@@ -14,7 +14,7 @@ internal sealed class TrayAppContext : ApplicationContext
 
     private readonly NotifyIcon _tray = new();
     private readonly HotkeyWindow _hotkeyWindow = new();
-    private readonly BorderOverlay _overlay = new();
+    private readonly Dictionary<IntPtr, BorderOverlay> _overlays = new();
     private readonly AwakeManager _awake = new();
     private readonly Settings _settings;
     private readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = 30_000 };
@@ -115,7 +115,7 @@ internal sealed class TrayAppContext : ApplicationContext
     {
         var hwnd = Native.GetForegroundWindow();
         if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd)) return;
-        if (hwnd == _overlay.Handle || hwnd == _hotkeyWindow.Handle) return;
+        if (hwnd == _hotkeyWindow.Handle) return;
 
         var className = new StringBuilder(256);
         Native.GetClassName(hwnd, className, className.Capacity);
@@ -138,10 +138,25 @@ internal sealed class TrayAppContext : ApplicationContext
             return;
         }
 
-        if (!Native.IsIconic(hwnd) && Native.GetWindowRect(hwnd, out var rect))
+        if (makeTopMost)
         {
-            _overlay.Flash(rect, makeTopMost ? Color.FromArgb(0, 120, 215) : Color.Gray);
+            if (!_overlays.ContainsKey(hwnd))
+            {
+                var overlay = new BorderOverlay(hwnd, Color.FromArgb(0, 120, 215));
+                _overlays.Add(hwnd, overlay);
+                overlay.TargetUnavailable += (_, _) => RemoveOverlay(hwnd, overlay);
+                if (!overlay.Start()) Balloon("实时边框同步未能启用，将使用快速轮询。");
+            }
         }
+        else RemoveOverlay(hwnd);
+    }
+
+    private void RemoveOverlay(IntPtr hwnd, BorderOverlay? expected = null)
+    {
+        if (!_overlays.TryGetValue(hwnd, out var overlay) ||
+            (expected != null && !ReferenceEquals(overlay, expected))) return;
+        _overlays.Remove(hwnd);
+        overlay.Dispose();
     }
 
     private void SetHotkeyEnabled(bool enable)
@@ -246,7 +261,10 @@ internal sealed class TrayAppContext : ApplicationContext
         _statusTimer.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
-        _overlay.Dispose();
+        foreach (var (hwnd, overlay) in _overlays.ToArray())
+        {
+            RemoveOverlay(hwnd, overlay);
+        }
         _hotkeyWindow.Dispose();
         if (_icon != null)
         {
